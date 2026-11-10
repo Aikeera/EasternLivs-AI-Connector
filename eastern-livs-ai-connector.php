@@ -28,6 +28,7 @@ final class ELAC_Connector {
         register_rest_route(self::ROUTE, '/catalog-audit', array('methods'=>'GET','callback'=>array(__CLASS__,'catalog_audit'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/import-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'import_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/yabi-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
+        register_rest_route(self::ROUTE, '/yabi-csv-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_csv_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/create-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_create'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/requests', array('methods'=>'GET','callback'=>array(__CLASS__,'list_requests'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/remove-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_remove'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
@@ -77,6 +78,36 @@ final class ELAC_Connector {
         $missing_images=array(); $missing_prices=array(); $missing_skus=array();
         foreach ($items as $p) { $entry=self::product_summary($p); if (!$p->get_image_id()) $missing_images[]=$entry; if ($p->get_regular_price()==='') $missing_prices[]=$entry; if ($p->get_sku()==='') $missing_skus[]=$entry; }
         return array('page'=>$page,'scanned'=>count($items),'missing_images'=>$missing_images,'missing_prices'=>$missing_prices,'missing_barcodes'=>$missing_skus,'read_only'=>true);
+    }
+    // Parse a bounded Yabi CSV upload into the existing read-only preview pipeline.
+    public static function yabi_csv_preview($request) {
+        $files=$request->get_file_params();
+        $upload=isset($files['file']) ? $files['file'] : null;
+        if (!is_array($upload) || !isset($upload['tmp_name'],$upload['error'],$upload['size']) || (int)$upload['error']!==UPLOAD_ERR_OK)
+            return new WP_Error('invalid_upload','A valid CSV file upload is required',array('status'=>400));
+        if ((int)$upload['size']<1 || (int)$upload['size']>1048576 || !is_uploaded_file($upload['tmp_name']))
+            return new WP_Error('invalid_size','CSV must be an uploaded file of at most 1 MiB',array('status'=>400));
+        $handle=fopen($upload['tmp_name'],'rb');
+        if (!$handle) return new WP_Error('csv_open_failed','Cannot open CSV',array('status'=>400));
+        $headers=fgetcsv($handle,0,',','"','\\');
+        if (!is_array($headers)) { fclose($handle); return new WP_Error('empty_csv','CSV has no header',array('status'=>400)); }
+        $headers[0]=preg_replace('/^\\xEF\\xBB\\xBF/','',$headers[0]);
+        $required=array('Product Name','EANs (JSON)','Price List (JSON)');
+        if (count($headers)!==count(array_unique($headers)) || count(array_diff($required,$headers))>0) {
+            fclose($handle); return new WP_Error('invalid_headers','Yabi CSV headers are missing or duplicated',array('status'=>400));
+        }
+        $rows=array();
+        while (($values=fgetcsv($handle,0,',','"','\\'))!==false) {
+            if (count($values)===1 && trim($values[0])==='') continue;
+            if (count($values)!==count($headers)) { fclose($handle); return new WP_Error('invalid_csv_row','CSV column count mismatch',array('status'=>400)); }
+            $rows[]=array_combine($headers,$values);
+            if (count($rows)>100) { fclose($handle); return new WP_Error('too_many_rows','Preview supports at most 100 rows per upload',array('status'=>400)); }
+        }
+        fclose($handle);
+        if (!$rows) return new WP_Error('empty_csv','No data rows found',array('status'=>400));
+        $preview_request=new WP_REST_Request('POST','/'.self::ROUTE.'/yabi-preview');
+        $preview_request->set_param('rows',$rows);
+        return self::yabi_preview($preview_request);
     }
     // Read-only Yabi export preview. Parse the actual JSON columns, never import implicitly.
     public static function yabi_preview($request) {

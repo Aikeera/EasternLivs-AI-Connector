@@ -1,0 +1,25 @@
+name: Connector validation
+on:
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+jobs:
+  php:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate PHP syntax
+        run: |
+          php -l eastern-livs-ai-connector.php
+      - name: Verify required safeguards
+        run: |
+          grep -q "permission_callback" eastern-livs-ai-connector.php
+          grep -q "check_admin_referer" eastern-livs-ai-connector.php
+          grep -q "wp_safe_remote_get" eastern-livs-ai-connector.php
+          grep -q "eligible_for_manual_review" eastern-livs-ai-connector.php
+      - name: Validate plugin packaging layout
+        run: |
+          mkdir -p /tmp/elac-package/eastern-livs-ai-connector
+          cp eastern-livs-ai-connector.php /tmp/elac-package/eastern-livs-ai-connector/
+          (cd /tmp/elac-package && zip -q -r eastern-livs-ai-connector.zip eastern-livs-ai-connector)
+          unzip -l /tmp/elac-package/eastern-livs-ai-connector.zip | grep -q 'eastern-livs-ai-connector/eastern-livs-ai-connector.php'

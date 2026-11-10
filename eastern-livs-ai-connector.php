@@ -130,6 +130,29 @@ final class ELAC_Connector {
             'automatic_image_retrieval'=>false,'verified_match'=>false,'uploaded'=>false,
             'note'=>'Research links only. Check manufacturer, exact package/weight, image license and source before submitting an admin-approved image request.');
     }
+    // Google Programmable Search image results via server-side credentials.
+    // Configure ELAC_GOOGLE_CSE_KEY and ELAC_GOOGLE_CSE_CX in wp-config.php.
+    // Never return credentials to clients or write them to logs.
+    public static function google_image_candidates($product) {
+        if (!defined('ELAC_GOOGLE_CSE_KEY') || !defined('ELAC_GOOGLE_CSE_CX')) {
+            return array('configured'=>false,'candidates'=>array(),'error'=>'Google Programmable Search credentials not configured');
+        }
+        $key=trim((string)ELAC_GOOGLE_CSE_KEY);
+        $cx=trim((string)ELAC_GOOGLE_CSE_CX);
+        if ($key==='' || $cx==='') return array('configured'=>false,'candidates'=>array(),'error'=>'Google search configuration incomplete');
+        $query=trim($product->get_name().' '.$product->get_sku().' product packaging');
+        $endpoint=add_query_arg(array('key'=>$key,'cx'=>$cx,'q'=>$query,'searchType'=>'image','num'=>10,'safe'=>'active'),'https://www.googleapis.com/customsearch/v1');
+        $response=wp_safe_remote_get($endpoint,array('timeout'=>12,'redirection'=>0,'limit_response_size'=>300000));
+        if (is_wp_error($response) || wp_remote_retrieve_response_code($response)!==200) return array('configured'=>true,'candidates'=>array(),'error'=>'Google image search unavailable');
+        $data=json_decode(wp_remote_retrieve_body($response),true);
+        $items=array();
+        foreach (($data['items'] ?? array()) as $item) {
+            $url=(string)($item['link'] ?? '');
+            if (!wp_http_validate_url($url) || strtolower((string)wp_parse_url($url,PHP_URL_SCHEME))!=='https') continue;
+            $items[]=array('title'=>sanitize_text_field($item['title'] ?? ''),'image_url'=>esc_url_raw($url),'source_url'=>esc_url_raw($item['image']['contextLink'] ?? ''),'thumbnail_url'=>esc_url_raw($item['image']['thumbnailLink'] ?? ''),'verified_package'=>false,'verified_license'=>false);
+        }
+        return array('configured'=>true,'candidates'=>$items,'count'=>count($items),'verified'=>false);
+    }
     // Real external image discovery using Wikimedia Commons public API.
     // Candidate metadata is unverified; an administrator must inspect package, weight and licensing.
     public static function image_candidates($request) {
@@ -154,7 +177,8 @@ final class ELAC_Connector {
             $meta=$info['extmetadata'] ?? array();
             $items[]=array('title'=>sanitize_text_field($page['title'] ?? ''),'source_url'=>esc_url_raw($info['descriptionurl'] ?? ''),'image_url'=>esc_url_raw($url),'thumbnail_url'=>esc_url_raw($info['thumburl'] ?? ''),'license'=>wp_strip_all_tags($meta['LicenseShortName']['value'] ?? ''),'artist'=>wp_strip_all_tags($meta['Artist']['value'] ?? ''),'verified_package'=>false,'verified_license'=>false);
         }
-        return array('product_id'=>$id,'product_name'=>$product->get_name(),'barcode'=>$product->get_sku(),'provider'=>'Wikimedia Commons','candidates'=>$items,'count'=>count($items),'automatically_approved'=>false,'uploaded'=>false,'note'=>'Search results are NOT verified product matches or license approvals. Review exact packaging, weight, rights and image source before requesting upload.');
+        $google=self::google_image_candidates($product);
+        return array('product_id'=>$id,'product_name'=>$product->get_name(),'barcode'=>$product->get_sku(),'provider'=>'Wikimedia Commons + Google Programmable Search','candidates'=>$items,'google'=>$google,'count'=>count($items)+count($google['candidates']),'automatically_approved'=>false,'uploaded'=>false,'note'=>'Search results are NOT verified product matches or license approvals. Review exact packaging, weight, rights and image source before requesting upload.');
     }
     public static function request_image($request) {
         if (!function_exists('wc_get_product')) return new WP_Error('woocommerce_missing','WooCommerce unavailable',array('status'=>503));

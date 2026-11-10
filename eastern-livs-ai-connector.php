@@ -210,7 +210,14 @@ final class ELAC_Connector {
             return new WP_Error('invalid_size','CSV must be an uploaded file of at most 1 MiB',array('status'=>400));
         $handle=fopen($upload['tmp_name'],'rb');
         if (!$handle) return new WP_Error('csv_open_failed','Cannot open CSV',array('status'=>400));
-        $headers=fgetcsv($handle,0,',','"','\\');
+        // Detect comma or semicolon exports without assuming the customer's Yabi locale.
+        $first_line=fgets($handle);
+        if ($first_line===false) { fclose($handle); return new WP_Error('empty_csv','CSV has no header',array('status'=>400)); }
+        $comma=str_getcsv($first_line,',','"','\\');
+        $semicolon=str_getcsv($first_line,';','"','\\');
+        $delimiter=count($semicolon)>count($comma)?';':',';
+        rewind($handle);
+        $headers=fgetcsv($handle,0,$delimiter,'"','\\');
         if (!is_array($headers)) { fclose($handle); return new WP_Error('empty_csv','CSV has no header',array('status'=>400)); }
         $headers[0]=preg_replace('/^\\xEF\\xBB\\xBF/','',$headers[0]);
         $required=array('Product Name','EANs (JSON)','Price List (JSON)');
@@ -218,7 +225,7 @@ final class ELAC_Connector {
             fclose($handle); return new WP_Error('invalid_headers','Yabi CSV headers are missing or duplicated',array('status'=>400));
         }
         $rows=array();
-        while (($values=fgetcsv($handle,0,',','"','\\'))!==false) {
+        while (($values=fgetcsv($handle,0,$delimiter,'"','\\'))!==false) {
             if (count($values)===1 && trim($values[0])==='') continue;
             if (count($values)!==count($headers)) { fclose($handle); return new WP_Error('invalid_csv_row','CSV column count mismatch',array('status'=>400)); }
             $rows[]=array_combine($headers,$values);

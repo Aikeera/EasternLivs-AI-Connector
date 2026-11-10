@@ -29,6 +29,7 @@ final class ELAC_Connector {
         register_rest_route(self::ROUTE, '/import-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'import_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/pages', array('methods'=>'GET','callback'=>array(__CLASS__,'pages'),'permission_callback'=>array(__CLASS__,'can_pages')));
         register_rest_route(self::ROUTE, '/image-search-links', array('methods'=>'GET','callback'=>array(__CLASS__,'image_search_links'),'permission_callback'=>array(__CLASS__,'can_read')));
+        register_rest_route(self::ROUTE, '/image-candidates', array('methods'=>'GET','callback'=>array(__CLASS__,'image_candidates'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/image-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_image'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/price-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_price'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
     }
@@ -129,6 +130,32 @@ final class ELAC_Connector {
             'automatic_image_retrieval'=>false,'verified_match'=>false,'uploaded'=>false,
             'note'=>'Research links only. Check manufacturer, exact package/weight, image license and source before submitting an admin-approved image request.');
     }
+    // Real external image discovery using Wikimedia Commons public API.
+    // Candidate metadata is unverified; an administrator must inspect package, weight and licensing.
+    public static function image_candidates($request) {
+        if (!function_exists('wc_get_product')) return new WP_Error('woocommerce_missing','WooCommerce unavailable',array('status'=>503));
+        $id=absint($request->get_param('product_id'));
+        $product=wc_get_product($id);
+        if (!$product) return new WP_Error('invalid_product','Product not found',array('status'=>404));
+        $query=trim(sanitize_text_field($product->get_name()));
+        if ($query==='' || strlen($query)>150) return new WP_Error('invalid_name','Product name missing or too long',array('status'=>400));
+        $endpoint=add_query_arg(array('action'=>'query','generator'=>'search','gsrsearch'=>$query,'gsrnamespace'=>6,'gsrlimit'=>10,'prop'=>'imageinfo','iiprop'=>'url|mime|extmetadata','iiurlwidth'=>400,'format'=>'json','formatversion'=>2),'https://commons.wikimedia.org/w/api.php');
+        $response=wp_safe_remote_get($endpoint,array('timeout'=>12,'redirection'=>0,'limit_response_size'=>300000,'headers'=>array('User-Agent'=>'EasternLivsAIConnector/0.5 (product image research; contact via easternlivs.se)')));
+        if (is_wp_error($response)) return new WP_Error('image_search_unavailable','Image source unavailable',array('status'=>502));
+        if (wp_remote_retrieve_response_code($response)!==200) return new WP_Error('image_search_http','Image provider returned an error',array('status'=>502));
+        $data=json_decode(wp_remote_retrieve_body($response),true);
+        if (!is_array($data) || !empty($data['error'])) return new WP_Error('image_search_invalid','Invalid provider response',array('status'=>502));
+        $items=array();
+        foreach (($data['query']['pages'] ?? array()) as $page) {
+            $info=$page['imageinfo'][0] ?? array();
+            $url=$info['url'] ?? '';
+            $mime=$info['mime'] ?? '';
+            if (!in_array($mime,array('image/jpeg','image/png','image/webp'),true) || !wp_http_validate_url($url)) continue;
+            $meta=$info['extmetadata'] ?? array();
+            $items[]=array('title'=>sanitize_text_field($page['title'] ?? ''),'source_url'=>esc_url_raw($info['descriptionurl'] ?? ''),'image_url'=>esc_url_raw($url),'thumbnail_url'=>esc_url_raw($info['thumburl'] ?? ''),'license'=>wp_strip_all_tags($meta['LicenseShortName']['value'] ?? ''),'artist'=>wp_strip_all_tags($meta['Artist']['value'] ?? ''),'verified_package'=>false,'verified_license'=>false);
+        }
+        return array('product_id'=>$id,'product_name'=>$product->get_name(),'barcode'=>$product->get_sku(),'provider'=>'Wikimedia Commons','candidates'=>$items,'count'=>count($items),'automatically_approved'=>false,'uploaded'=>false,'note'=>'Search results are NOT verified product matches or license approvals. Review exact packaging, weight, rights and image source before requesting upload.');
+    }
     public static function request_image($request) {
         if (!function_exists('wc_get_product')) return new WP_Error('woocommerce_missing','WooCommerce unavailable',array('status'=>503));
         $id=absint($request->get_param('product_id'));
@@ -172,7 +199,7 @@ final class ELAC_Connector {
     }
     public static function dashboard() {
         if (!current_user_can('manage_options')) wp_die('Not permitted');
-        echo '<div class="wrap"><h1>Eastern Livs AI Connector</h1><p><strong>Version 0.3.0:</strong> An authenticated WordPress REST foundation, not direct ChatGPT Plus integration. No shared API keys or public write access.</p>';
+        echo '<div class="wrap"><h1>Eastern Livs AI Connector</h1><p><strong>Version 0.5.0 development:</strong> An authenticated WordPress REST foundation, not direct ChatGPT Plus integration. No shared API keys or public write access.</p>';
         echo '<p>API base: <code>'.esc_html(rest_url(self::ROUTE)).'</code>. Use WordPress Application Passwords over HTTPS with a dedicated least-privilege account. Never paste passwords or API credentials into chat.</p>';
         echo '<p>Read: <code>/status</code>, <code>/products</code>, <code>/catalog-search?q=barcode-or-name</code>, <code>/catalog-audit?page=1&amp;per_page=50</code>, <code>/pages</code>. Submit: <code>POST /image-request</code> with <code>product_id</code> and <code>image_url</code> (HTTPS), or <code>POST /price-request</code> with <code>product_id</code> and <code>regular_price</code>. No modification occurs until an administrator approves.</p>';
         $requests=get_posts(array('post_type'=>self::CPT,'post_status'=>'private','posts_per_page'=>50,'orderby'=>'date','order'=>'DESC'));

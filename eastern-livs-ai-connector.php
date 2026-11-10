@@ -140,11 +140,15 @@ final class ELAC_Connector {
             $validated[]=array('name'=>$name,'barcode'=>$sku,'regular_price'=>$price);
         }
         // Refuse duplicates already awaiting approval to prevent repeated requests.
-        $pending=get_posts(array('post_type'=>self::CPT,'post_status'=>'private','posts_per_page'=>100,
-            'meta_query'=>array(array('key'=>'_elac_type','value'=>'create'),array('key'=>'_elac_state','value'=>'pending'))));
-        foreach ($pending as $post) {
-            if (isset($seen[(string)get_post_meta($post->ID,'_elac_new_sku',true)]))
-                return new WP_Error('pending_duplicate','A create request for this barcode is already pending',array('status'=>409));
+        // Query each requested barcode directly: a fixed-size recent scan could miss older pending requests.
+        foreach ($validated as $row) {
+            $duplicates=get_posts(array('post_type'=>self::CPT,'post_status'=>'private','fields'=>'ids',
+                'posts_per_page'=>1,'no_found_rows'=>true,
+                'meta_query'=>array('relation'=>'AND',
+                    array('key'=>'_elac_type','value'=>'create','compare'=>'='),
+                    array('key'=>'_elac_state','value'=>'pending','compare'=>'='),
+                    array('key'=>'_elac_new_sku','value'=>$row['barcode'],'compare'=>'='))));
+            if ($duplicates) return new WP_Error('pending_duplicate','A create request for this barcode is already pending',array('status'=>409));
         }
         $created=array();
         foreach ($validated as $row) {

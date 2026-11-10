@@ -343,10 +343,8 @@ final class ELAC_Connector {
         try {
             $result=self::import_create_requests($batch);
             if (is_wp_error($result)) return $result;
-        } finally {
-            delete_option($lock_key);
-        }
-        // Return a deterministic continuation cursor bound to the reviewed upload.
+            // Build and save the success receipt while holding the lock.
+            // Return a deterministic continuation cursor bound to the reviewed upload.
         // The caller can safely re-upload the same file and resume at next_offset;
         // no file is retained on the server and no WooCommerce products are created.
         $data=$result instanceof WP_REST_Response ? $result->get_data() : $result;
@@ -360,8 +358,11 @@ final class ELAC_Connector {
         $data['batch_id']=$job_key;
         // Keep the result until explicitly cleaned up by an administrator.
         // This prevents successful batches being silently requeued after retries.
-        update_option($job_key,$data,false);
-        return new WP_REST_Response($data,201);
+            update_option($job_key,$data,false);
+            return new WP_REST_Response($data,201);
+        } finally {
+            delete_option($lock_key);
+        }
     }
     public static function yabi_csv_preview($request) {
         $files=$request->get_file_params();

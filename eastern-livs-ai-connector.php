@@ -294,7 +294,7 @@ final class ELAC_Connector {
             if (!isset($seen[(int)$row['row']])) continue;
             if (empty($row['eligible_for_manual_review']))
                 return new WP_Error('ineligible_row','Selected row has validation issues',array('status'=>409,'row'=>$row['row']));
-            $rows[]=array('name'=>$row['name'],'barcode'=>$row['barcode'],'regular_price'=>$row['price']);
+            $rows[]=array('name'=>$row['name'],'barcode'=>$row['barcode'],'price'=>$row['price']);
         }
         if (count($rows)!==count($seen))
             return new WP_Error('missing_row','Some selected rows are not in the CSV page',array('status'=>400));

@@ -29,6 +29,7 @@ final class ELAC_Connector {
         register_rest_route(self::ROUTE, '/import-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'import_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/yabi-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/create-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_create'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
+        register_rest_route(self::ROUTE, '/requests', array('methods'=>'GET','callback'=>array(__CLASS__,'list_requests'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/pages', array('methods'=>'GET','callback'=>array(__CLASS__,'pages'),'permission_callback'=>array(__CLASS__,'can_pages')));
         register_rest_route(self::ROUTE, '/image-search-links', array('methods'=>'GET','callback'=>array(__CLASS__,'image_search_links'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/image-candidates', array('methods'=>'GET','callback'=>array(__CLASS__,'image_candidates'),'permission_callback'=>array(__CLASS__,'can_read')));
@@ -155,6 +156,22 @@ final class ELAC_Connector {
         return array('pages'=>$result,'note'=>'Read-only metadata. Elementor layouts are not modified by this plugin.');
     }
     // Draft-only creation, always administrator approved. Never publishes products.
+    // Read-only request queue for authenticated store administrators.
+    public static function list_requests($request) {
+        $page=max(1,absint($request->get_param('page') ?: 1));
+        $per_page=min(50,max(1,absint($request->get_param('per_page') ?: 20)));
+        $state=sanitize_key((string)$request->get_param('state'));
+        if ($state!=='' && !in_array($state,array('pending','approved','rejected'),true)) return new WP_Error('invalid_state','Invalid request state',array('status'=>400));
+        $args=array('post_type'=>self::CPT,'post_status'=>'private','posts_per_page'=>$per_page,'paged'=>$page,'orderby'=>'date','order'=>'DESC');
+        if ($state!=='') $args['meta_query']=array(array('key'=>'_elac_state','value'=>$state,'compare'=>'='));
+        $query=new WP_Query($args);
+        $items=array();
+        foreach ($query->posts as $post) {
+            $type=(string)get_post_meta($post->ID,'_elac_type',true);
+            $items[]=array('request_id'=>$post->ID,'type'=>$type===''?'price':$type,'state'=>get_post_meta($post->ID,'_elac_state',true),'product_id'=>(int)get_post_meta($post->ID,'_elac_product_id',true),'created_product_id'=>(int)get_post_meta($post->ID,'_elac_created_product_id',true),'requested_by'=>(int)get_post_meta($post->ID,'_elac_requested_by',true),'approved_by'=>(int)get_post_meta($post->ID,'_elac_approved_by',true),'date'=>$post->post_date_gmt);
+        }
+        return array('read_only'=>true,'page'=>$page,'total'=>(int)$query->found_posts,'pages'=>(int)$query->max_num_pages,'requests'=>$items);
+    }
     public static function request_create($request) {
         if (!function_exists('wc_get_product_id_by_sku')) return new WP_Error('woocommerce_missing','WooCommerce unavailable',array('status'=>503));
         $name=trim(sanitize_text_field((string)$request->get_param('name')));

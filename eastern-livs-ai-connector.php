@@ -329,7 +329,20 @@ final class ELAC_Connector {
         // The batch endpoint also checks live WooCommerce and pending requests.
         $batch=new WP_REST_Request('POST','/'.self::ROUTE.'/import-create-requests');
         $batch->set_param('rows',$rows);
-        return self::import_create_requests($batch);
+        $result=self::import_create_requests($batch);
+        if (is_wp_error($result)) return $result;
+        // Return a deterministic continuation cursor bound to the reviewed upload.
+        // The caller can safely re-upload the same file and resume at next_offset;
+        // no file is retained on the server and no WooCommerce products are created.
+        $data=$result instanceof WP_REST_Response ? $result->get_data() : $result;
+        $data['file_sha256']=$expected;
+        $data['processed_offset']=$offset;
+        $data['selected_row_indices']=array_map('intval',array_keys($seen));
+        sort($data['selected_row_indices'],SORT_NUMERIC);
+        $data['next_offset']=$page['next_offset'];
+        $data['has_more']=$page['has_more'];
+        $data['resume_requires_same_file']=true;
+        return new WP_REST_Response($data,201);
     }
     public static function yabi_csv_preview($request) {
         $files=$request->get_file_params();

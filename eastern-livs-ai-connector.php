@@ -337,14 +337,14 @@ final class ELAC_Connector {
         $page=max(1,absint($request->get_param('page') ?: 1));
         $per_page=min(50,max(1,absint($request->get_param('per_page') ?: 20)));
         $state=sanitize_key((string)$request->get_param('state'));
-        if ($state!=='' && !in_array($state,array('pending','approved','rejected'),true)) return new WP_Error('invalid_state','Invalid request state',array('status'=>400));
+        if ($state!=='' && !in_array($state,array('pending','approved','rejected','cancelled'),true)) return new WP_Error('invalid_state','Invalid request state',array('status'=>400));
         $args=array('post_type'=>self::CPT,'post_status'=>'private','posts_per_page'=>$per_page,'paged'=>$page,'orderby'=>'date','order'=>'DESC');
         if ($state!=='') $args['meta_query']=array(array('key'=>'_elac_state','value'=>$state,'compare'=>'='));
         $query=new WP_Query($args);
         $items=array();
         foreach ($query->posts as $post) {
             $type=(string)get_post_meta($post->ID,'_elac_type',true);
-            $items[]=array('request_id'=>$post->ID,'type'=>$type===''?'price':$type,'state'=>get_post_meta($post->ID,'_elac_state',true),'product_id'=>(int)get_post_meta($post->ID,'_elac_product_id',true),'created_product_id'=>(int)get_post_meta($post->ID,'_elac_created_product_id',true),'requested_by'=>(int)get_post_meta($post->ID,'_elac_requested_by',true),'approved_by'=>(int)get_post_meta($post->ID,'_elac_approved_by',true),'date'=>$post->post_date_gmt);
+            $items[]=array('request_id'=>$post->ID,'type'=>$type===''?'price':$type,'state'=>get_post_meta($post->ID,'_elac_state',true),'product_id'=>(int)get_post_meta($post->ID,'_elac_product_id',true),'created_product_id'=>(int)get_post_meta($post->ID,'_elac_created_product_id',true),'requested_by'=>(int)get_post_meta($post->ID,'_elac_requested_by',true),'approved_by'=>(int)get_post_meta($post->ID,'_elac_approved_by',true),'decided_by'=>(int)get_post_meta($post->ID,'_elac_decided_by',true),'decided_at'=>(string)get_post_meta($post->ID,'_elac_decided_at',true),'date'=>$post->post_date_gmt);
         }
         return array('read_only'=>true,'page'=>$page,'total'=>(int)$query->found_posts,'pages'=>(int)$query->max_num_pages,'requests'=>$items);
     }
@@ -416,6 +416,7 @@ final class ELAC_Connector {
         if (!$product || !$product->is_type('simple')) return new WP_Error('unsupported','Only existing simple WooCommerce products are supported',array('status'=>400));
         $request_id=wp_insert_post(array('post_type'=>self::CPT,'post_status'=>'private','post_title'=>'Price request for #'.$id));
         if (is_wp_error($request_id) || !$request_id) return new WP_Error('save_failed','Could not save request',array('status'=>500));
+        update_post_meta($request_id,'_elac_type','price');
         update_post_meta($request_id,'_elac_product_id',$id);
         update_post_meta($request_id,'_elac_old_price',$product->get_regular_price());
         update_post_meta($request_id,'_elac_price',wc_format_decimal((string)$price,2));

@@ -28,6 +28,7 @@ final class ELAC_Connector {
         register_rest_route(self::ROUTE, '/catalog-audit', array('methods'=>'GET','callback'=>array(__CLASS__,'catalog_audit'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/import-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'import_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/yabi-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
+        register_rest_route(self::ROUTE, '/create-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_create'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/pages', array('methods'=>'GET','callback'=>array(__CLASS__,'pages'),'permission_callback'=>array(__CLASS__,'can_pages')));
         register_rest_route(self::ROUTE, '/image-search-links', array('methods'=>'GET','callback'=>array(__CLASS__,'image_search_links'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/image-candidates', array('methods'=>'GET','callback'=>array(__CLASS__,'image_candidates'),'permission_callback'=>array(__CLASS__,'can_read')));
@@ -152,6 +153,26 @@ final class ELAC_Connector {
         $items=get_posts(array('post_type'=>'page','post_status'=>array('publish','draft','private'),'posts_per_page'=>min(30,max(1,(int)$request->get_param('per_page') ?: 10)),'orderby'=>'ID','order'=>'DESC'));
         $result=array(); foreach($items as $p) { $result[]=array('id'=>$p->ID,'title'=>get_the_title($p),'status'=>$p->post_status,'edit_url'=>get_edit_post_link($p->ID,'raw')); }
         return array('pages'=>$result,'note'=>'Read-only metadata. Elementor layouts are not modified by this plugin.');
+    }
+    // Draft-only creation, always administrator approved. Never publishes products.
+    public static function request_create($request) {
+        if (!function_exists('wc_get_product_id_by_sku')) return new WP_Error('woocommerce_missing','WooCommerce unavailable',array('status'=>503));
+        $name=trim(sanitize_text_field((string)$request->get_param('name')));
+        $sku=trim((string)$request->get_param('barcode'));
+        $price=trim((string)$request->get_param('regular_price'));
+        if ($name==='' || strlen($name)>200) return new WP_Error('invalid_name','Valid product name required',array('status'=>400));
+        if (!preg_match('/^[0-9]{8,14}$/D',$sku)) return new WP_Error('invalid_barcode','8-14 digit barcode required',array('status'=>400));
+        if (!preg_match('/^\\d{1,7}(?:\\.\\d{1,2})?$/D',$price)) return new WP_Error('invalid_price','Nonnegative price required',array('status'=>400));
+        if (wc_get_product_id_by_sku($sku)) return new WP_Error('duplicate_barcode','Product already exists',array('status'=>409));
+        $id=wp_insert_post(array('post_type'=>self::CPT,'post_status'=>'private','post_title'=>'Create draft: '.$name));
+        if (is_wp_error($id) || !$id) return new WP_Error('save_failed','Could not save request',array('status'=>500));
+        update_post_meta($id,'_elac_type','create');
+        update_post_meta($id,'_elac_new_name',$name);
+        update_post_meta($id,'_elac_new_sku',$sku);
+        update_post_meta($id,'_elac_new_price',wc_format_decimal($price,2));
+        update_post_meta($id,'_elac_state','pending');
+        update_post_meta($id,'_elac_requested_by',get_current_user_id());
+        return new WP_REST_Response(array('request_id'=>$id,'state'=>'pending','message'=>'Administrator approval required; no product created.'),201);
     }
     public static function request_category($request) {
         if (!function_exists('wc_get_product')) return new WP_Error('woocommerce_missing','WooCommerce unavailable',array('status'=>503));
@@ -317,8 +338,8 @@ final class ELAC_Connector {
         $requests=get_posts(array('post_type'=>self::CPT,'post_status'=>'private','posts_per_page'=>50,'orderby'=>'date','order'=>'DESC'));
         echo '<h2>Price and image requests</h2><table class="widefat striped"><thead><tr><th>Request</th><th>Product</th><th>Old</th><th>Requested</th><th>Status</th><th>Action</th></tr></thead><tbody>';
         foreach($requests as $r) {
-            $state=get_post_meta($r->ID,'_elac_state',true); $pid=(int)get_post_meta($r->ID,'_elac_product_id',true); $is_image=get_post_meta($r->ID,'_elac_type',true)==='image'; $is_stock=get_post_meta($r->ID,'_elac_type',true)==='stock'; $is_category=get_post_meta($r->ID,'_elac_type',true)==='category';
-            echo '<tr><td>'.esc_html($r->ID).'</td><td>'.esc_html($pid).'</td><td>'.esc_html($is_image?'Image #'.get_post_meta($r->ID,'_elac_old_image_id',true):($is_stock?'Stock: '.get_post_meta($r->ID,'_elac_old_stock',true):($is_category?'Categories':get_post_meta($r->ID,'_elac_old_price',true)))).'</td><td>'.($is_image?'<a target="_blank" rel="noopener noreferrer" href="'.esc_url(get_post_meta($r->ID,'_elac_image_url',true)).'">Review image URL</a>':esc_html($is_stock?get_post_meta($r->ID,'_elac_stock',true):($is_category?'Category #'.get_post_meta($r->ID,'_elac_category_id',true):get_post_meta($r->ID,'_elac_price',true)))).'</td><td>'.esc_html($state).'</td><td>';
+            $state=get_post_meta($r->ID,'_elac_state',true); $pid=(int)get_post_meta($r->ID,'_elac_product_id',true); $is_image=get_post_meta($r->ID,'_elac_type',true)==='image'; $is_stock=get_post_meta($r->ID,'_elac_type',true)==='stock'; $is_category=get_post_meta($r->ID,'_elac_type',true)==='category'; $is_create=get_post_meta($r->ID,'_elac_type',true)==='create';
+            echo '<tr><td>'.esc_html($r->ID).'</td><td>'.esc_html($is_create?'NEW DRAFT':$pid).'</td><td>'.esc_html($is_image?'Image #'.get_post_meta($r->ID,'_elac_old_image_id',true):($is_stock?'Stock: '.get_post_meta($r->ID,'_elac_old_stock',true):($is_category?'Categories':($is_create?'New product':get_post_meta($r->ID,'_elac_old_price',true))))).'</td><td>'.($is_image?'<a target="_blank" rel="noopener noreferrer" href="'.esc_url(get_post_meta($r->ID,'_elac_image_url',true)).'">Review image URL</a>':esc_html($is_stock?get_post_meta($r->ID,'_elac_stock',true):($is_category?'Category #'.get_post_meta($r->ID,'_elac_category_id',true):($is_create?get_post_meta($r->ID,'_elac_new_name',true):get_post_meta($r->ID,'_elac_price',true))))).'</td><td>'.esc_html($state).'</td><td>';
             if($state==='pending') { foreach(array('approve'=>'Approve','reject'=>'Reject') as $decision=>$label) {
                 echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="display:inline;margin-right:5px">';
                 echo '<input type="hidden" name="action" value="elac_decide"><input type="hidden" name="request_id" value="'.esc_attr($r->ID).'"><input type="hidden" name="decision" value="'.esc_attr($decision).'">';
@@ -343,6 +364,21 @@ final class ELAC_Connector {
             $attachment=self::attach_image((string)get_post_meta($id,'_elac_image_url',true),$pid);
             if (is_wp_error($attachment)) wp_die(esc_html($attachment->get_error_message()));
             $p->set_image_id($attachment); $p->save(); update_post_meta($id,'_elac_state','approved');
+            update_post_meta($id,'_elac_approved_by',get_current_user_id());
+        }
+        elseif($decision==='approve' && get_post_meta($id,'_elac_type',true)==='create') {
+            if (!class_exists('WC_Product_Simple')) wp_die('WooCommerce inactive');
+            $sku=(string)get_post_meta($id,'_elac_new_sku',true);
+            if (wc_get_product_id_by_sku($sku)) wp_die('Barcode now exists; reject and resubmit.');
+            $p=new WC_Product_Simple();
+            $p->set_name((string)get_post_meta($id,'_elac_new_name',true));
+            $p->set_sku($sku);
+            $p->set_regular_price((string)get_post_meta($id,'_elac_new_price',true));
+            $p->set_status('draft');
+            $new_id=$p->save();
+            if (!$new_id) wp_die('Could not create draft');
+            update_post_meta($id,'_elac_created_product_id',$new_id);
+            update_post_meta($id,'_elac_state','approved');
             update_post_meta($id,'_elac_approved_by',get_current_user_id());
         }
         elseif($decision==='approve' && get_post_meta($id,'_elac_type',true)==='category') {

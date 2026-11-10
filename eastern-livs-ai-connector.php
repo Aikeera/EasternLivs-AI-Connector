@@ -27,6 +27,7 @@ final class ELAC_Connector {
         register_rest_route(self::ROUTE, '/catalog-search', array('methods'=>'GET','callback'=>array(__CLASS__,'catalog_search'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/catalog-audit', array('methods'=>'GET','callback'=>array(__CLASS__,'catalog_audit'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/import-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'import_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
+        register_rest_route(self::ROUTE, '/yabi-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/pages', array('methods'=>'GET','callback'=>array(__CLASS__,'pages'),'permission_callback'=>array(__CLASS__,'can_pages')));
         register_rest_route(self::ROUTE, '/image-search-links', array('methods'=>'GET','callback'=>array(__CLASS__,'image_search_links'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/image-candidates', array('methods'=>'GET','callback'=>array(__CLASS__,'image_candidates'),'permission_callback'=>array(__CLASS__,'can_read')));
@@ -73,6 +74,56 @@ final class ELAC_Connector {
         $missing_images=array(); $missing_prices=array(); $missing_skus=array();
         foreach ($items as $p) { $entry=self::product_summary($p); if (!$p->get_image_id()) $missing_images[]=$entry; if ($p->get_regular_price()==='') $missing_prices[]=$entry; if ($p->get_sku()==='') $missing_skus[]=$entry; }
         return array('page'=>$page,'scanned'=>count($items),'missing_images'=>$missing_images,'missing_prices'=>$missing_prices,'missing_barcodes'=>$missing_skus,'read_only'=>true);
+    }
+    // Read-only Yabi export preview. Parse the actual JSON columns, never import implicitly.
+    public static function yabi_preview($request) {
+        if (!function_exists('wc_get_product_id_by_sku')) return new WP_Error('woocommerce_missing','WooCommerce unavailable',array('status'=>503));
+        $rows=$request->get_param('rows');
+        if (!is_array($rows) || count($rows)<1 || count($rows)>100) return new WP_Error('invalid_rows','Provide 1 to 100 Yabi rows',array('status'=>400));
+        $normalized=array(); $warnings=array();
+        foreach ($rows as $i=>$row) {
+            if (!is_array($row)) return new WP_Error('invalid_row','Invalid Yabi row',array('status'=>400));
+            $name=trim((string)($row['Product Name'] ?? ''));
+            $eans=json_decode((string)($row['EANs (JSON)'] ?? ''),true);
+            $prices=json_decode((string)($row['Price List (JSON)'] ?? ''),true);
+            $codes=array();
+            if (is_array($eans)) {
+                foreach ($eans as $ean) {
+                    $candidate=is_scalar($ean)?(string)$ean:(is_array($ean)?(string)($ean['ean'] ?? $ean['EAN'] ?? $ean['barcode'] ?? ''):'');
+                    if (preg_match('/^[0-9]{8,14}$/D',$candidate)) $codes[]=$candidate;
+                }
+            }
+            $codes=array_values(array_unique($codes));
+            $cents=array();
+            if (is_array($prices)) {
+                foreach ($prices as $entry) {
+                    if (!is_array($entry)) continue;
+                    $amount=$entry['centAmount'] ?? null;
+                    if ((is_int($amount) || (is_string($amount) && preg_match('/^\\d+$/D',$amount))) && (float)$amount<=999999999) $cents[]=(int)$amount;
+                }
+            }
+            $issues=array();
+            if (count($codes)===0) $issues[]='missing_or_unrecognized_ean';
+            if (count($codes)>1) $issues[]='multiple_eans_require_selection';
+            if (count($cents)===0) $issues[]='missing_or_unrecognized_price';
+            if (count(array_unique($cents))>1) $issues[]='multiple_prices_require_selection';
+            if ($name==='') $issues[]='missing_name';
+            $normalized[]=array('name'=>$name,'barcode'=>count($codes)===1?$codes[0]:'','price'=>count(array_unique($cents))===1?number_format($cents[0]/100,2,'.',''):'');
+            $warnings[]=array('row'=>$i,'issues'=>$issues,'eans'=>$codes,'price_cent_amounts'=>$cents);
+        }
+        // Explicitly validate the normalized rows below; no database mutations.
+        $checked=array(); $seen=array();
+        foreach ($normalized as $i=>$item) {
+            $issues=$warnings[$i]['issues']; $sku=$item['barcode'];
+            if ($sku!=='') {
+                if (isset($seen[$sku])) $issues[]='duplicate_barcode_in_batch';
+                $seen[$sku]=true;
+                $existing=wc_get_product_id_by_sku($sku);
+                if ($existing) $issues[]='existing_product_barcode';
+            } else $existing=0;
+            $checked[]=array('row'=>$i,'name'=>sanitize_text_field($item['name']),'barcode'=>$sku,'price'=>$item['price'],'existing_product_id'=>(int)$existing,'issues'=>array_values(array_unique($issues)),'eligible_for_manual_review'=>empty($issues));
+        }
+        return array('read_only'=>true,'imported'=>0,'scanned'=>count($checked),'rows'=>$checked,'note'=>'Yabi preview only; no WooCommerce records changed.');
     }
     // Dry-run only: inspect up to 100 normalized Yabi records per call. No writes.
     public static function import_preview($request) {

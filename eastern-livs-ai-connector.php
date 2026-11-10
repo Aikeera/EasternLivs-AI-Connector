@@ -112,7 +112,7 @@ final class ELAC_Connector {
         if ($spoken==='' || strlen($spoken)>500) return new WP_Error('invalid_text','Transcript must be 1-500 characters',array('status'=>400));
         $normalized=preg_replace('/\\s+/u',' ',$spoken);
         $intent='search';
-        if (preg_match('/(?:قیمت|price|قیمت بدل|rate)/iu',$normalized)) $intent='price_request';
+        if (preg_match('/(?:قیمت\s*(?:بدل|تبدیل|تبدیل\s*کرو|لگاؤ|لگائیں)|(?:change|set|update)\s+(?:the\s+)?price|price\s+(?:change|update))/iu',$normalized)) $intent='price_request';
         elseif (preg_match('/(?:اسٹاک|stock|quantity)/iu',$normalized)) $intent='stock_request';
         elseif (preg_match('/(?:تصویر|image|picture|photo)/iu',$normalized)) $intent='image_search';
         elseif (preg_match('/(?:ہٹاؤ|ہٹائیں|remove|unpublish)/iu',$normalized)) $intent='remove_request';

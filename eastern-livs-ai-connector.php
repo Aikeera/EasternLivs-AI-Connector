@@ -152,11 +152,27 @@ final class ELAC_Connector {
         }
         $created=array();
         foreach ($validated as $row) {
-            if (wc_get_product_id_by_sku($row['barcode'])) return new WP_Error('barcode_taken','Barcode appeared during request processing; inspect the queue before retrying',array('status'=>409,'created_request_ids'=>$created));
+            if (wc_get_product_id_by_sku($row['barcode'])) {
+                foreach ($created as $pending_id) {
+                    if (get_post_meta($pending_id,'_elac_state',true)==='pending') {
+                        update_post_meta($pending_id,'_elac_state','cancelled');
+                        update_post_meta($pending_id,'_elac_cancel_reason','Batch failed barcode recheck');
+                    }
+                }
+                return new WP_Error('barcode_taken','Barcode appeared during processing; new batch requests cancelled',array('status'=>409,'cancelled_request_ids'=>$created));
+            }
             $single=new WP_REST_Request('POST','/'.self::ROUTE.'/create-request');
             foreach ($row as $key=>$value) $single->set_param($key,$value);
             $result=self::request_create($single);
-            if (is_wp_error($result)) return new WP_Error('partial_batch','Some requests may have been saved; inspect approval queue before retrying',array('status'=>500,'created_request_ids'=>$created));
+            if (is_wp_error($result)) {
+                foreach ($created as $pending_id) {
+                    if (get_post_meta($pending_id,'_elac_state',true)==='pending') {
+                        update_post_meta($pending_id,'_elac_state','cancelled');
+                        update_post_meta($pending_id,'_elac_cancel_reason','Batch creation failed');
+                    }
+                }
+                return new WP_Error('batch_cancelled','Batch creation failed; previously created requests marked cancelled',array('status'=>500,'cancelled_request_ids'=>$created));
+            }
             $data=$result instanceof WP_REST_Response ? $result->get_data() : $result;
             $created[]=(int)$data['request_id'];
         }

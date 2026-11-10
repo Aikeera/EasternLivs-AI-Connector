@@ -28,6 +28,7 @@ final class ELAC_Connector {
         register_rest_route(self::ROUTE, '/catalog-audit', array('methods'=>'GET','callback'=>array(__CLASS__,'catalog_audit'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/import-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'import_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/pages', array('methods'=>'GET','callback'=>array(__CLASS__,'pages'),'permission_callback'=>array(__CLASS__,'can_pages')));
+        register_rest_route(self::ROUTE, '/image-search-links', array('methods'=>'GET','callback'=>array(__CLASS__,'image_search_links'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/image-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_image'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/price-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_price'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
     }
@@ -112,6 +113,21 @@ final class ELAC_Connector {
         update_post_meta($request_id,'_elac_state','pending');
         update_post_meta($request_id,'_elac_requested_by',get_current_user_id());
         return new WP_REST_Response(array('request_id'=>$request_id,'state'=>'pending','message'=>'Administrator must approve in WordPress dashboard. No price changed.'),201);
+    }
+    // Research handoff: trusted search-engine links only, no scraping or auto-upload.
+    public static function image_search_links($request) {
+        if (!function_exists('wc_get_product')) return new WP_Error('woocommerce_missing','WooCommerce unavailable',array('status'=>503));
+        $id=absint($request->get_param('product_id'));
+        $product=wc_get_product($id);
+        if (!$product) return new WP_Error('invalid_product','Product not found',array('status'=>404));
+        $name=trim((string)$product->get_name());
+        $sku=trim((string)$product->get_sku());
+        $terms=trim($name.' '.$sku.' product packaging');
+        return array('product_id'=>$id,'product_name'=>$name,'barcode'=>$sku,
+            'google_images'=>'https://www.google.com/search?tbm=isch&q='.rawurlencode($terms),
+            'bing_images'=>'https://www.bing.com/images/search?q='.rawurlencode($terms),
+            'automatic_image_retrieval'=>false,'verified_match'=>false,'uploaded'=>false,
+            'note'=>'Research links only. Check manufacturer, exact package/weight, image license and source before submitting an admin-approved image request.');
     }
     public static function request_image($request) {
         if (!function_exists('wc_get_product')) return new WP_Error('woocommerce_missing','WooCommerce unavailable',array('status'=>503));

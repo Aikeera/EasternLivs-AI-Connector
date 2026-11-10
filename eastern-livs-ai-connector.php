@@ -140,7 +140,7 @@ final class ELAC_Connector {
             $validated[]=array('name'=>$name,'barcode'=>$sku,'regular_price'=>$price);
         }
         // Refuse duplicates already awaiting approval to prevent repeated requests.
-        $pending=get_posts(array('post_type'=>self::CPT,'post_status'=>'private','posts_per_page'=>-1,
+        $pending=get_posts(array('post_type'=>self::CPT,'post_status'=>'private','posts_per_page'=>100,
             'meta_query'=>array(array('key'=>'_elac_type','value'=>'create'),array('key'=>'_elac_state','value'=>'pending'))));
         foreach ($pending as $post) {
             if (isset($seen[(string)get_post_meta($post->ID,'_elac_new_sku',true)]))
@@ -148,6 +148,7 @@ final class ELAC_Connector {
         }
         $created=array();
         foreach ($validated as $row) {
+            if (wc_get_product_id_by_sku($row['barcode'])) return new WP_Error('barcode_taken','Barcode appeared during request processing; inspect the queue before retrying',array('status'=>409,'created_request_ids'=>$created));
             $single=new WP_REST_Request('POST','/'.self::ROUTE.'/create-request');
             foreach ($row as $key=>$value) $single->set_param($key,$value);
             $result=self::request_create($single);

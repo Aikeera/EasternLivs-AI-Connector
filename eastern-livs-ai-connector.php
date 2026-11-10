@@ -29,6 +29,7 @@ final class ELAC_Connector {
         register_rest_route(self::ROUTE, '/import-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'import_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/yabi-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/yabi-csv-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_csv_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
+        register_rest_route(self::ROUTE, '/import-create-requests', array('methods'=>'POST','callback'=>array(__CLASS__,'import_create_requests'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/create-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_create'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/requests', array('methods'=>'GET','callback'=>array(__CLASS__,'list_requests'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/remove-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_remove'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
@@ -78,6 +79,44 @@ final class ELAC_Connector {
         $missing_images=array(); $missing_prices=array(); $missing_skus=array();
         foreach ($items as $p) { $entry=self::product_summary($p); if (!$p->get_image_id()) $missing_images[]=$entry; if ($p->get_regular_price()==='') $missing_prices[]=$entry; if ($p->get_sku()==='') $missing_skus[]=$entry; }
         return array('page'=>$page,'scanned'=>count($items),'missing_images'=>$missing_images,'missing_prices'=>$missing_prices,'missing_barcodes'=>$missing_skus,'read_only'=>true);
+    }
+    // Create individually reviewable draft-product requests from a small validated batch.
+    // This never creates, publishes or modifies WooCommerce products.
+    public static function import_create_requests($request) {
+        if (!function_exists('wc_get_product_id_by_sku')) return new WP_Error('woocommerce_missing','WooCommerce unavailable',array('status'=>503));
+        $rows=$request->get_param('rows');
+        if (!is_array($rows) || count($rows)<1 || count($rows)>20)
+            return new WP_Error('invalid_rows','Provide 1 to 20 normalized rows',array('status'=>400));
+        $validated=array(); $seen=array();
+        foreach ($rows as $row) {
+            if (!is_array($row)) return new WP_Error('invalid_row','Invalid row',array('status'=>400));
+            $name=trim(sanitize_text_field((string)($row['name'] ?? '')));
+            $sku=trim((string)($row['barcode'] ?? ''));
+            $price=trim((string)($row['price'] ?? ''));
+            if ($name==='' || strlen($name)>200 || !preg_match('/^[0-9]{8,14}$/D',$sku) ||
+                !preg_match('/^\\d{1,7}(?:\\.\\d{1,2})?$/D',$price) || isset($seen[$sku]) || wc_get_product_id_by_sku($sku))
+                return new WP_Error('invalid_batch','All rows must be valid, unique and absent from WooCommerce',array('status'=>409));
+            $seen[$sku]=true;
+            $validated[]=array('name'=>$name,'barcode'=>$sku,'regular_price'=>$price);
+        }
+        // Refuse duplicates already awaiting approval to prevent repeated requests.
+        $pending=get_posts(array('post_type'=>self::CPT,'post_status'=>'private','posts_per_page'=>-1,
+            'meta_query'=>array(array('key'=>'_elac_type','value'=>'create'),array('key'=>'_elac_state','value'=>'pending'))));
+        foreach ($pending as $post) {
+            if (isset($seen[(string)get_post_meta($post->ID,'_elac_new_sku',true)]))
+                return new WP_Error('pending_duplicate','A create request for this barcode is already pending',array('status'=>409));
+        }
+        $created=array();
+        foreach ($validated as $row) {
+            $single=new WP_REST_Request('POST','/'.self::ROUTE.'/create-request');
+            foreach ($row as $key=>$value) $single->set_param($key,$value);
+            $result=self::request_create($single);
+            if (is_wp_error($result)) return new WP_Error('partial_batch','Some requests may have been saved; inspect approval queue before retrying',array('status'=>500,'created_request_ids'=>$created));
+            $data=$result instanceof WP_REST_Response ? $result->get_data() : $result;
+            $created[]=(int)$data['request_id'];
+        }
+        return new WP_REST_Response(array('created_request_ids'=>$created,'pending_approval'=>count($created),
+            'products_created'=>0,'message'=>'Requests saved; each product requires explicit administrator approval.'),201);
     }
     // Parse a bounded Yabi CSV upload into the existing read-only preview pipeline.
     public static function yabi_csv_preview($request) {

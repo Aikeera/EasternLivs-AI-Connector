@@ -29,6 +29,7 @@ final class ELAC_Connector {
         register_rest_route(self::ROUTE, '/import-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'import_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/yabi-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/yabi-csv-page', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_csv_page'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
+        register_rest_route(self::ROUTE, '/yabi-csv-queue', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_csv_queue'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/yabi-csv-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_csv_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/import-create-requests', array('methods'=>'POST','callback'=>array(__CLASS__,'import_create_requests'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/voice-command-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'voice_command_preview'),'permission_callback'=>array(__CLASS__,'can_read')));
@@ -254,6 +255,52 @@ final class ELAC_Connector {
         $result['has_more']=$more;
         $result['uploaded_file_sha256']=hash_file('sha256',$upload['tmp_name']);
         return $result;
+    }
+    // Explicitly queue selected rows from a re-uploaded CSV page. Never create products here.
+    // Each queued request still needs a separate administrator approval.
+    public static function yabi_csv_queue($request) {
+        $expected=strtolower(trim((string)$request->get_param('file_sha256')));
+        if (!preg_match('/^[a-f0-9]{64}$/D',$expected))
+            return new WP_Error('invalid_hash','A SHA-256 file hash is required',array('status'=>400));
+        $files=$request->get_file_params();
+        $upload=isset($files['file']) ? $files['file'] : null;
+        if (!is_array($upload) || empty($upload['tmp_name']) || !is_uploaded_file($upload['tmp_name']) ||
+            !isset($upload['error']) || (int)$upload['error']!==UPLOAD_ERR_OK ||
+            !isset($upload['size']) || (int)$upload['size']<1 || (int)$upload['size']>20971520)
+            return new WP_Error('invalid_upload','Valid CSV upload of at most 20 MiB required',array('status'=>400));
+        if (!hash_equals($expected,hash_file('sha256',$upload['tmp_name'])))
+            return new WP_Error('file_changed','CSV file differs from the reviewed preview',array('status'=>409));
+        $selected=$request->get_param('row_indices');
+        if (!is_array($selected) || count($selected)<1 || count($selected)>20)
+            return new WP_Error('invalid_selection','Select 1 to 20 row indices from one page',array('status'=>400));
+        $offset=$request->get_param('offset');
+        if (!is_scalar($offset) || !preg_match('/^\\d{1,7}$/D',(string)$offset) || (int)$offset>1000000)
+            return new WP_Error('invalid_offset','Valid page offset required',array('status'=>400));
+        $offset=(int)$offset; $seen=array();
+        foreach ($selected as $index) {
+            if (!is_int($index) && !(is_string($index) && preg_match('/^\\d+$/D',$index)))
+                return new WP_Error('invalid_index','Row indices must be integers',array('status'=>400));
+            $index=(int)$index;
+            if ($index<$offset || $index>=$offset+100 || isset($seen[$index]))
+                return new WP_Error('invalid_index','Select unique indices within the requested page',array('status'=>400));
+            $seen[$index]=true;
+        }
+        $page=self::yabi_csv_page($request);
+        if (is_wp_error($page)) return $page;
+        if (!isset($page['uploaded_file_sha256']) || !hash_equals($expected,$page['uploaded_file_sha256']))
+            return new WP_Error('file_changed','Preview file hash mismatch',array('status'=>409));
+        $rows=array();
+        foreach ($page['rows'] as $row) {
+            if (!isset($seen[(int)$row['row']])) continue;
+            if (empty($row['eligible_for_manual_review']))
+                return new WP_Error('ineligible_row','Selected row has validation issues',array('status'=>409,'row'=>$row['row']));
+            $rows[]=array('name'=>$row['name'],'barcode'=>$row['barcode'],'regular_price'=>$row['price']);
+        }
+        if (count($rows)!==count($seen))
+            return new WP_Error('missing_row','Some selected rows are not in the CSV page',array('status'=>400));
+        $batch=new WP_REST_Request('POST','/'.self::ROUTE.'/import-create-requests');
+        $batch->set_param('rows',$rows);
+        return self::import_create_requests($batch);
     }
     public static function yabi_csv_preview($request) {
         $files=$request->get_file_params();

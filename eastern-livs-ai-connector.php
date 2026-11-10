@@ -26,6 +26,7 @@ final class ELAC_Connector {
         register_rest_route(self::ROUTE, '/products', array('methods'=>'GET','callback'=>array(__CLASS__,'products'),'permission_callback'=>array(__CLASS__,'can_read'),'args'=>array('page'=>array('default'=>1,'sanitize_callback'=>'absint'),'per_page'=>array('default'=>10,'sanitize_callback'=>'absint'))));
         register_rest_route(self::ROUTE, '/catalog-search', array('methods'=>'GET','callback'=>array(__CLASS__,'catalog_search'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/catalog-audit', array('methods'=>'GET','callback'=>array(__CLASS__,'catalog_audit'),'permission_callback'=>array(__CLASS__,'can_read')));
+        register_rest_route(self::ROUTE, '/import-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'import_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/pages', array('methods'=>'GET','callback'=>array(__CLASS__,'pages'),'permission_callback'=>array(__CLASS__,'can_pages')));
         register_rest_route(self::ROUTE, '/image-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_image'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/price-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_price'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
@@ -68,6 +69,29 @@ final class ELAC_Connector {
         $missing_images=array(); $missing_prices=array(); $missing_skus=array();
         foreach ($items as $p) { $entry=self::product_summary($p); if (!$p->get_image_id()) $missing_images[]=$entry; if ($p->get_regular_price()==='') $missing_prices[]=$entry; if ($p->get_sku()==='') $missing_skus[]=$entry; }
         return array('page'=>$page,'scanned'=>count($items),'missing_images'=>$missing_images,'missing_prices'=>$missing_prices,'missing_barcodes'=>$missing_skus,'read_only'=>true);
+    }
+    // Dry-run only: inspect up to 100 normalized Yabi records per call. No writes.
+    public static function import_preview($request) {
+        if (!function_exists('wc_get_product_id_by_sku')) return new WP_Error('woocommerce_missing','WooCommerce unavailable',array('status'=>503));
+        $rows=$request->get_param('rows');
+        if (!is_array($rows) || !$rows || count($rows)>100) return new WP_Error('invalid_rows','Supply 1 to 100 rows',array('status'=>400));
+        $result=array(); $seen=array();
+        foreach ($rows as $index=>$row) {
+            if (!is_array($row)) return new WP_Error('invalid_row','Each row must be an object',array('status'=>400));
+            $name=sanitize_text_field((string)($row['name'] ?? ''));
+            $sku=trim((string)($row['barcode'] ?? ''));
+            $price=trim((string)($row['price'] ?? ''));
+            $issues=array();
+            if ($name==='' || strlen($name)>200) $issues[]='invalid_name';
+            if ($sku==='' || !preg_match('/^[0-9]{8,14}$/D',$sku)) $issues[]='missing_or_invalid_barcode';
+            if ($price==='' || !preg_match('/^\\d{1,7}(?:\\.\\d{1,2})?$/D',$price)) $issues[]='missing_or_invalid_price';
+            if ($sku!=='' && isset($seen[$sku])) $issues[]='duplicate_barcode_in_batch';
+            if ($sku!=='') $seen[$sku]=true;
+            $existing=($sku!=='' && preg_match('/^[0-9]{8,14}$/D',$sku)) ? wc_get_product_id_by_sku($sku) : 0;
+            if ($existing) $issues[]='existing_product_barcode';
+            $result[]=array('row'=>$index,'name'=>$name,'barcode'=>$sku,'price'=>$price,'existing_product_id'=>(int)$existing,'issues'=>$issues,'eligible_for_manual_review'=>empty($issues));
+        }
+        return array('read_only'=>true,'imported'=>0,'scanned'=>count($result),'rows'=>$result,'note'=>'Preview only; no products, prices, images or stock modified.');
     }
     public static function pages($request) {
         $items=get_posts(array('post_type'=>'page','post_status'=>array('publish','draft','private'),'posts_per_page'=>min(30,max(1,(int)$request->get_param('per_page') ?: 10)),'orderby'=>'ID','order'=>'DESC'));

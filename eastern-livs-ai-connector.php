@@ -335,8 +335,19 @@ final class ELAC_Connector {
             return new WP_REST_Response($saved,200);
         // Atomic add_option prevents two concurrent workers from creating the same batch.
         $lock_key=$job_key.'_lock';
-        if (!add_option($lock_key,time(),'','no'))
-            return new WP_Error('batch_in_progress','This CSV selection is already being queued; retry shortly',array('status'=>409));
+        if (!add_option($lock_key,time(),'','no')) {
+            // A terminated PHP worker may leave a lock behind. Only recover a lock
+            // older than ten minutes; re-check the saved receipt before retrying.
+            $locked_at=get_option($lock_key,0);
+            if (!is_numeric($locked_at) || (int)$locked_at>time()-600)
+                return new WP_Error('batch_in_progress','This CSV selection is already being queued; retry shortly',array('status'=>409));
+            delete_option($lock_key);
+            $saved=get_option($job_key,false);
+            if (is_array($saved) && isset($saved['created_request_ids']))
+                return new WP_REST_Response($saved,200);
+            if (!add_option($lock_key,time(),'','no'))
+                return new WP_Error('batch_in_progress','Concurrent retry detected',array('status'=>409));
+        }
         // The batch endpoint also checks live WooCommerce and pending requests.
         $batch=new WP_REST_Request('POST','/'.self::ROUTE.'/import-create-requests');
         $batch->set_param('rows',$rows);

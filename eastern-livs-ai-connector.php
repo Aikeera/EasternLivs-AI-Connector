@@ -64,7 +64,12 @@ final class ELAC_Connector {
         $items=array(); $seen=array();
         $sku=wc_get_product_id_by_sku($query);
         if ($sku) { $p=wc_get_product($sku); if ($p && in_array($p->get_status(),array('publish','draft','private'),true)) { $items[]=$p; $seen[$p->get_id()]=true; } }
-        $ids=wc_get_products(array('status'=>array('publish','draft','private'),'limit'=>$limit,'s'=>$query,'return'=>'ids'));
+        // WooCommerce product queries do not consistently implement the WP_Query 's' parameter.
+        // Search product titles using WordPress' native search, then hydrate through WooCommerce.
+        $search=new WP_Query(array('post_type'=>'product','post_status'=>array('publish','draft','private'),
+            's'=>$query,'posts_per_page'=>$limit,'fields'=>'ids','no_found_rows'=>true,
+            'ignore_sticky_posts'=>true,'orderby'=>'relevance'));
+        $ids=$search->posts;
         foreach ($ids as $id) { if (!isset($seen[$id])) { $p=wc_get_product($id); if ($p) { $items[]=$p; $seen[$id]=true; } } if (count($items)>=$limit) break; }
         $result=array(); foreach ($items as $p) $result[]=self::product_summary($p);
         return array('query'=>$query,'count'=>count($result),'products'=>$result,'read_only'=>true);

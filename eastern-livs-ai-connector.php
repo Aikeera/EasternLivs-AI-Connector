@@ -31,6 +31,7 @@ final class ELAC_Connector {
         register_rest_route(self::ROUTE, '/yabi-csv-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_csv_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/import-create-requests', array('methods'=>'POST','callback'=>array(__CLASS__,'import_create_requests'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/voice-command-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'voice_command_preview'),'permission_callback'=>array(__CLASS__,'can_read')));
+        register_rest_route(self::ROUTE, '/voice-product-search', array('methods'=>'POST','callback'=>array(__CLASS__,'voice_product_search'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/create-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_create'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/requests', array('methods'=>'GET','callback'=>array(__CLASS__,'list_requests'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/remove-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_remove'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
@@ -80,6 +81,24 @@ final class ELAC_Connector {
         $missing_images=array(); $missing_prices=array(); $missing_skus=array();
         foreach ($items as $p) { $entry=self::product_summary($p); if (!$p->get_image_id()) $missing_images[]=$entry; if ($p->get_regular_price()==='') $missing_prices[]=$entry; if ($p->get_sku()==='') $missing_skus[]=$entry; }
         return array('page'=>$page,'scanned'=>count($items),'missing_images'=>$missing_images,'missing_prices'=>$missing_prices,'missing_barcodes'=>$missing_skus,'read_only'=>true);
+    }
+    // Resolve spoken product queries against the real WooCommerce catalogue, never demo items.
+    public static function voice_product_search($request) {
+        $text=trim(sanitize_text_field((string)$request->get_param('text')));
+        if ($text==='' || strlen($text)>500) return new WP_Error('invalid_text','Transcript must be 1-500 characters',array('status'=>400));
+        $clean=preg_replace('/(?:تلاش کریں|تلاش کرو|ڈھونڈو|ڈھونڈیں|کی قیمت|کا ریٹ|کی تصویر|کی فوٹو|search for|find|show me|what is the price of|price of|picture of|image of)/iu',' ',$text);
+        $clean=trim(preg_replace('/\\s+/u',' ',$clean));
+        $barcode=null;
+        if (preg_match('/(?:^|\\D)([0-9]{8,14})(?:\\D|$)/u',$clean,$match)) $barcode=$match[1];
+        $query=$barcode ?: $clean;
+        if (strlen($query)<2 || strlen($query)>120) return new WP_Error('invalid_query','Recognized search must be 2-120 characters',array('status'=>400));
+        $lookup=new WP_REST_Request('GET','/'.self::ROUTE.'/catalog-search');
+        $lookup->set_param('q',$query);
+        $lookup->set_param('limit',20);
+        $results=self::catalog_search($lookup);
+        if (is_wp_error($results)) return $results;
+        return array('read_only'=>true,'transcript'=>$text,'query'=>$query,'results'=>$results,
+            'message'=>'Live WooCommerce catalogue search; no changes made.');
     }
     // Urdu/English voice transcript interpretation; no mutation or external AI calls.
     // This endpoint is deliberately a preview: user confirms before any request is created.

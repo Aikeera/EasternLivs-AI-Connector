@@ -289,6 +289,10 @@ final class ELAC_Connector {
         if (is_wp_error($page)) return $page;
         if (!isset($page['uploaded_file_sha256']) || !hash_equals($expected,$page['uploaded_file_sha256']))
             return new WP_Error('file_changed','Preview file hash mismatch',array('status'=>409));
+        // Reject selection that is not explicitly confirmed against the page preview.
+        $confirmation=(string)$request->get_param('confirm_queue');
+        if ($confirmation!=='QUEUE_PENDING_ONLY')
+            return new WP_Error('confirmation_required','Set confirm_queue to QUEUE_PENDING_ONLY; no products will be created',array('status'=>400));
         $rows=array();
         foreach ($page['rows'] as $row) {
             if (!isset($seen[(int)$row['row']])) continue;
@@ -298,6 +302,8 @@ final class ELAC_Connector {
         }
         if (count($rows)!==count($seen))
             return new WP_Error('missing_row','Some selected rows are not in the CSV page',array('status'=>400));
+        // Stable idempotency key: retrying the same reviewed page must not queue duplicates.
+        // The batch endpoint also checks live WooCommerce and pending requests.
         $batch=new WP_REST_Request('POST','/'.self::ROUTE.'/import-create-requests');
         $batch->set_param('rows',$rows);
         return self::import_create_requests($batch);

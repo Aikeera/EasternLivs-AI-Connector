@@ -625,6 +625,9 @@ final class ELAC_Connector {
             $p->set_regular_price($new); $p->save(); update_post_meta($id,'_elac_state','approved');
             update_post_meta($id,'_elac_approved_by',get_current_user_id());
         } else wp_die('Invalid action');
+        // Timestamp only successful, final decisions; failures above do not create audit events.
+        update_post_meta($id,'_elac_decided_by',get_current_user_id());
+        update_post_meta($id,'_elac_decided_at',current_time('mysql',true));
         wp_safe_redirect(admin_url('admin.php?page=elac-dashboard')); exit;
     }
 }

@@ -152,6 +152,22 @@ final class ELAC_Connector {
         }
         $created=array();
         foreach ($validated as $row) {
+            // A second pending check closes the common gap between batch validation and creation.
+            $pending=get_posts(array('post_type'=>self::CPT,'post_status'=>'private','fields'=>'ids',
+                'posts_per_page'=>1,'no_found_rows'=>true,
+                'meta_query'=>array('relation'=>'AND',
+                    array('key'=>'_elac_type','value'=>'create'),
+                    array('key'=>'_elac_state','value'=>'pending'),
+                    array('key'=>'_elac_new_sku','value'=>$row['barcode']))));
+            if ($pending) {
+                foreach ($created as $pending_id) {
+                    if (get_post_meta($pending_id,'_elac_state',true)==='pending') {
+                        update_post_meta($pending_id,'_elac_state','cancelled');
+                        update_post_meta($pending_id,'_elac_cancel_reason','Duplicate pending barcode detected');
+                    }
+                }
+                return new WP_Error('pending_duplicate','Another pending request uses this barcode; batch cancelled',array('status'=>409,'cancelled_request_ids'=>$created));
+            }
             if (wc_get_product_id_by_sku($row['barcode'])) {
                 foreach ($created as $pending_id) {
                     if (get_post_meta($pending_id,'_elac_state',true)==='pending') {

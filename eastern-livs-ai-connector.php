@@ -32,6 +32,7 @@ final class ELAC_Connector {
         register_rest_route(self::ROUTE, '/image-candidates', array('methods'=>'GET','callback'=>array(__CLASS__,'image_candidates'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/image-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_image'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/price-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_price'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
+        register_rest_route(self::ROUTE, '/stock-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_stock'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
     }
     public static function can_read() { return current_user_can('manage_woocommerce') || current_user_can('manage_options'); }
     public static function can_pages() { return current_user_can('edit_pages'); }
@@ -99,6 +100,24 @@ final class ELAC_Connector {
         $items=get_posts(array('post_type'=>'page','post_status'=>array('publish','draft','private'),'posts_per_page'=>min(30,max(1,(int)$request->get_param('per_page') ?: 10)),'orderby'=>'ID','order'=>'DESC'));
         $result=array(); foreach($items as $p) { $result[]=array('id'=>$p->ID,'title'=>get_the_title($p),'status'=>$p->post_status,'edit_url'=>get_edit_post_link($p->ID,'raw')); }
         return array('pages'=>$result,'note'=>'Read-only metadata. Elementor layouts are not modified by this plugin.');
+    }
+    public static function request_stock($request) {
+        if (!function_exists('wc_get_product')) return new WP_Error('woocommerce_missing','WooCommerce unavailable',array('status'=>503));
+        $id=absint($request->get_param('product_id'));
+        $raw=$request->get_param('quantity');
+        if (!is_scalar($raw) || !preg_match('/^\\d{1,7}$/D',(string)$raw)) return new WP_Error('invalid_quantity','Nonnegative integer stock quantity required',array('status'=>400));
+        $product=wc_get_product($id);
+        if (!$product || !$product->is_type('simple')) return new WP_Error('invalid_product','Existing simple product required',array('status'=>400));
+        $request_id=wp_insert_post(array('post_type'=>self::CPT,'post_status'=>'private','post_title'=>'Stock request for #'.$id));
+        if (is_wp_error($request_id) || !$request_id) return new WP_Error('save_failed','Could not save request',array('status'=>500));
+        update_post_meta($request_id,'_elac_type','stock');
+        update_post_meta($request_id,'_elac_product_id',$id);
+        update_post_meta($request_id,'_elac_old_manage_stock',$product->get_manage_stock()?'yes':'no');
+        update_post_meta($request_id,'_elac_old_stock',$product->get_stock_quantity());
+        update_post_meta($request_id,'_elac_stock',absint($raw));
+        update_post_meta($request_id,'_elac_state','pending');
+        update_post_meta($request_id,'_elac_requested_by',get_current_user_id());
+        return new WP_REST_Response(array('request_id'=>$request_id,'state'=>'pending','message'=>'Administrator approval required; stock unchanged.'),201);
     }
     public static function request_price($request) {
         if (!function_exists('wc_get_product')) return new WP_Error('woocommerce_missing','WooCommerce is not active',array('status'=>503));
@@ -229,8 +248,8 @@ final class ELAC_Connector {
         $requests=get_posts(array('post_type'=>self::CPT,'post_status'=>'private','posts_per_page'=>50,'orderby'=>'date','order'=>'DESC'));
         echo '<h2>Price and image requests</h2><table class="widefat striped"><thead><tr><th>Request</th><th>Product</th><th>Old</th><th>Requested</th><th>Status</th><th>Action</th></tr></thead><tbody>';
         foreach($requests as $r) {
-            $state=get_post_meta($r->ID,'_elac_state',true); $pid=(int)get_post_meta($r->ID,'_elac_product_id',true); $is_image=get_post_meta($r->ID,'_elac_type',true)==='image';
-            echo '<tr><td>'.esc_html($r->ID).'</td><td>'.esc_html($pid).'</td><td>'.esc_html($is_image?'Image #'.get_post_meta($r->ID,'_elac_old_image_id',true):get_post_meta($r->ID,'_elac_old_price',true)).'</td><td>'.($is_image?'<a target="_blank" rel="noopener noreferrer" href="'.esc_url(get_post_meta($r->ID,'_elac_image_url',true)).'">Review image URL</a>':esc_html(get_post_meta($r->ID,'_elac_price',true))).'</td><td>'.esc_html($state).'</td><td>';
+            $state=get_post_meta($r->ID,'_elac_state',true); $pid=(int)get_post_meta($r->ID,'_elac_product_id',true); $is_image=get_post_meta($r->ID,'_elac_type',true)==='image'; $is_stock=get_post_meta($r->ID,'_elac_type',true)==='stock';
+            echo '<tr><td>'.esc_html($r->ID).'</td><td>'.esc_html($pid).'</td><td>'.esc_html($is_image?'Image #'.get_post_meta($r->ID,'_elac_old_image_id',true):($is_stock?'Stock: '.get_post_meta($r->ID,'_elac_old_stock',true):get_post_meta($r->ID,'_elac_old_price',true))).'</td><td>'.($is_image?'<a target="_blank" rel="noopener noreferrer" href="'.esc_url(get_post_meta($r->ID,'_elac_image_url',true)).'">Review image URL</a>':esc_html($is_stock?get_post_meta($r->ID,'_elac_stock',true):get_post_meta($r->ID,'_elac_price',true))).'</td><td>'.esc_html($state).'</td><td>';
             if($state==='pending') { foreach(array('approve'=>'Approve','reject'=>'Reject') as $decision=>$label) {
                 echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="display:inline;margin-right:5px">';
                 echo '<input type="hidden" name="action" value="elac_decide"><input type="hidden" name="request_id" value="'.esc_attr($r->ID).'"><input type="hidden" name="decision" value="'.esc_attr($decision).'">';
@@ -255,6 +274,19 @@ final class ELAC_Connector {
             $attachment=self::attach_image((string)get_post_meta($id,'_elac_image_url',true),$pid);
             if (is_wp_error($attachment)) wp_die(esc_html($attachment->get_error_message()));
             $p->set_image_id($attachment); $p->save(); update_post_meta($id,'_elac_state','approved');
+            update_post_meta($id,'_elac_approved_by',get_current_user_id());
+        }
+        elseif($decision==='approve' && get_post_meta($id,'_elac_type',true)==='stock') {
+            if (!function_exists('wc_get_product')) wp_die('WooCommerce inactive');
+            $pid=(int)get_post_meta($id,'_elac_product_id',true); $p=wc_get_product($pid);
+            if (!$p || !$p->is_type('simple')) wp_die('Product no longer supported');
+            $old_manage=get_post_meta($id,'_elac_old_manage_stock',true)==='yes';
+            $old_stock=get_post_meta($id,'_elac_old_stock',true);
+            if ($p->get_manage_stock()!==$old_manage || (string)$p->get_stock_quantity()!==(string)$old_stock) wp_die('Stock changed since request; reject and resubmit.');
+            $p->set_manage_stock(true);
+            $p->set_stock_quantity((int)get_post_meta($id,'_elac_stock',true));
+            $p->save();
+            update_post_meta($id,'_elac_state','approved');
             update_post_meta($id,'_elac_approved_by',get_current_user_id());
         }
         elseif($decision==='approve') {

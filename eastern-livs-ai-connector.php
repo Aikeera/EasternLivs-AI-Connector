@@ -30,6 +30,7 @@ final class ELAC_Connector {
         register_rest_route(self::ROUTE, '/yabi-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/yabi-csv-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_csv_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/import-create-requests', array('methods'=>'POST','callback'=>array(__CLASS__,'import_create_requests'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
+        register_rest_route(self::ROUTE, '/voice-command-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'voice_command_preview'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/create-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_create'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/requests', array('methods'=>'GET','callback'=>array(__CLASS__,'list_requests'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/remove-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_remove'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
@@ -79,6 +80,26 @@ final class ELAC_Connector {
         $missing_images=array(); $missing_prices=array(); $missing_skus=array();
         foreach ($items as $p) { $entry=self::product_summary($p); if (!$p->get_image_id()) $missing_images[]=$entry; if ($p->get_regular_price()==='') $missing_prices[]=$entry; if ($p->get_sku()==='') $missing_skus[]=$entry; }
         return array('page'=>$page,'scanned'=>count($items),'missing_images'=>$missing_images,'missing_prices'=>$missing_prices,'missing_barcodes'=>$missing_skus,'read_only'=>true);
+    }
+    // Urdu/English voice transcript interpretation; no mutation or external AI calls.
+    // This endpoint is deliberately a preview: user confirms before any request is created.
+    public static function voice_command_preview($request) {
+        $spoken=trim(sanitize_text_field((string)$request->get_param('text')));
+        if ($spoken==='' || strlen($spoken)>500) return new WP_Error('invalid_text','Transcript must be 1-500 characters',array('status'=>400));
+        $normalized=preg_replace('/\\s+/u',' ',$spoken);
+        $intent='search';
+        if (preg_match('/(?:قیمت|price|قیمت بدل|rate)/iu',$normalized)) $intent='price_request';
+        elseif (preg_match('/(?:اسٹاک|stock|quantity)/iu',$normalized)) $intent='stock_request';
+        elseif (preg_match('/(?:تصویر|image|picture|photo)/iu',$normalized)) $intent='image_search';
+        elseif (preg_match('/(?:ہٹاؤ|ہٹائیں|remove|unpublish)/iu',$normalized)) $intent='remove_request';
+        $amount=null;
+        if (preg_match('/(?:^|\\s)([0-9]+(?:[.,][0-9]{1,2})?)\\s*(?:kr|sek|کرونر)?(?:\\s|$)/iu',$normalized,$m)) $amount=str_replace(',','.',$m[1]);
+        $barcode=null;
+        if (preg_match('/(?:^|\\D)([0-9]{8,14})(?:\\D|$)/u',$normalized,$m)) $barcode=$m[1];
+        return array('read_only'=>true,'transcript'=>$spoken,'language_hint'=>preg_match('/[\\x{0600}-\\x{06FF}]/u',$spoken)?'ur':'en',
+            'intent'=>$intent,'amount_candidate'=>$amount,'barcode_candidate'=>$barcode,
+            'requires_user_confirmation'=>true,'requires_admin_approval'=>true,
+            'warning'=>'Rule-based transcript preview only. No microphone capture, speech recognition, AI generation, or product mutation.');
     }
     // Create individually reviewable draft-product requests from a small validated batch.
     // This never creates, publishes or modifies WooCommerce products.

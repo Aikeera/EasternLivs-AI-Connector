@@ -11,6 +11,8 @@ jobs:
       - name: Validate PHP syntax
         run: |
           php -l eastern-livs-ai-connector.php
+      - name: Run Yabi preview smoke tests
+        run: php tests/yabi-preview-smoke.php
       - name: Verify required safeguards
         run: |
           grep -q "permission_callback" eastern-livs-ai-connector.php

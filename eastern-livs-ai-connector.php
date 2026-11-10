@@ -30,6 +30,7 @@ final class ELAC_Connector {
         register_rest_route(self::ROUTE, '/yabi-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/create-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_create'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/requests', array('methods'=>'GET','callback'=>array(__CLASS__,'list_requests'),'permission_callback'=>array(__CLASS__,'can_read')));
+        register_rest_route(self::ROUTE, '/remove-request', array('methods'=>'POST','callback'=>array(__CLASS__,'request_remove'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/pages', array('methods'=>'GET','callback'=>array(__CLASS__,'pages'),'permission_callback'=>array(__CLASS__,'can_pages')));
         register_rest_route(self::ROUTE, '/image-search-links', array('methods'=>'GET','callback'=>array(__CLASS__,'image_search_links'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/image-candidates', array('methods'=>'GET','callback'=>array(__CLASS__,'image_candidates'),'permission_callback'=>array(__CLASS__,'can_read')));
@@ -157,6 +158,22 @@ final class ELAC_Connector {
     }
     // Draft-only creation, always administrator approved. Never publishes products.
     // Read-only request queue for authenticated store administrators.
+    // Soft removal only: move an approved product to draft, never trash/delete.
+    public static function request_remove($request) {
+        if (!function_exists('wc_get_product')) return new WP_Error('woocommerce_missing','WooCommerce unavailable',array('status'=>503));
+        $pid=absint($request->get_param('product_id')); $p=wc_get_product($pid);
+        if (!$p || !$p->is_type('simple')) return new WP_Error('invalid_product','Existing simple product required',array('status'=>400));
+        $status=$p->get_status();
+        if ($status!=='publish') return new WP_Error('invalid_status','Only published products can be unpublished',array('status'=>400));
+        $id=wp_insert_post(array('post_type'=>self::CPT,'post_status'=>'private','post_title'=>'Unpublish request for #'.$pid));
+        if (is_wp_error($id) || !$id) return new WP_Error('save_failed','Could not save request',array('status'=>500));
+        update_post_meta($id,'_elac_type','remove');
+        update_post_meta($id,'_elac_product_id',$pid);
+        update_post_meta($id,'_elac_old_status',$status);
+        update_post_meta($id,'_elac_state','pending');
+        update_post_meta($id,'_elac_requested_by',get_current_user_id());
+        return new WP_REST_Response(array('request_id'=>$id,'state'=>'pending','message'=>'Admin approval required; product remains published.'),201);
+    }
     public static function list_requests($request) {
         $page=max(1,absint($request->get_param('page') ?: 1));
         $per_page=min(50,max(1,absint($request->get_param('per_page') ?: 20)));
@@ -381,6 +398,15 @@ final class ELAC_Connector {
             $attachment=self::attach_image((string)get_post_meta($id,'_elac_image_url',true),$pid);
             if (is_wp_error($attachment)) wp_die(esc_html($attachment->get_error_message()));
             $p->set_image_id($attachment); $p->save(); update_post_meta($id,'_elac_state','approved');
+            update_post_meta($id,'_elac_approved_by',get_current_user_id());
+        }
+        elseif($decision==='approve' && get_post_meta($id,'_elac_type',true)==='remove') {
+            if (!function_exists('wc_get_product')) wp_die('WooCommerce inactive');
+            $pid=(int)get_post_meta($id,'_elac_product_id',true); $p=wc_get_product($pid);
+            if (!$p || !$p->is_type('simple') || $p->get_status()!=='publish') wp_die('Product status changed; reject and resubmit.');
+            $p->set_status('draft');
+            $p->save();
+            update_post_meta($id,'_elac_state','approved');
             update_post_meta($id,'_elac_approved_by',get_current_user_id());
         }
         elseif($decision==='approve' && get_post_meta($id,'_elac_type',true)==='create') {

@@ -345,6 +345,13 @@ final class ELAC_Connector {
         if (!preg_match('/^[0-9]{8,14}$/D',$sku)) return new WP_Error('invalid_barcode','8-14 digit barcode required',array('status'=>400));
         if (!preg_match('/^\\d{1,7}(?:\\.\\d{1,2})?$/D',$price)) return new WP_Error('invalid_price','Nonnegative price required',array('status'=>400));
         if (wc_get_product_id_by_sku($sku)) return new WP_Error('duplicate_barcode','Product already exists',array('status'=>409));
+        $existing_pending=get_posts(array('post_type'=>self::CPT,'post_status'=>'private','fields'=>'ids',
+            'posts_per_page'=>1,'no_found_rows'=>true,
+            'meta_query'=>array('relation'=>'AND',
+                array('key'=>'_elac_type','value'=>'create'),
+                array('key'=>'_elac_state','value'=>'pending'),
+                array('key'=>'_elac_new_sku','value'=>$sku))));
+        if ($existing_pending) return new WP_Error('pending_duplicate','A create request for this barcode is already awaiting approval',array('status'=>409));
         $id=wp_insert_post(array('post_type'=>self::CPT,'post_status'=>'private','post_title'=>'Create draft: '.$name));
         if (is_wp_error($id) || !$id) return new WP_Error('save_failed','Could not save request',array('status'=>500));
         update_post_meta($id,'_elac_type','create');

@@ -221,6 +221,7 @@ final class ELAC_Connector {
         $id=absint($request->get_param('product_id'));
         $url=esc_url_raw((string)$request->get_param('image_url'));
         $expected_sku=trim((string)$request->get_param('expected_sku'));
+        if ($expected_sku==='') return new WP_Error('missing_expected_sku','Barcode confirmation required before requesting an image',array('status'=>400));
         $product=wc_get_product($id);
         if (!$product || !$product->is_type('simple')) return new WP_Error('invalid_product','Existing simple product required',array('status'=>400));
         if ($expected_sku!=='' && $expected_sku!==$product->get_sku()) return new WP_Error('sku_mismatch','Product barcode does not match expected_sku',array('status'=>409));

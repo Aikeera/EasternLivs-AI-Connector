@@ -28,6 +28,7 @@ final class ELAC_Connector {
         register_rest_route(self::ROUTE, '/catalog-audit', array('methods'=>'GET','callback'=>array(__CLASS__,'catalog_audit'),'permission_callback'=>array(__CLASS__,'can_read')));
         register_rest_route(self::ROUTE, '/import-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'import_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/yabi-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
+        register_rest_route(self::ROUTE, '/yabi-csv-page', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_csv_page'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/yabi-csv-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'yabi_csv_preview'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/import-create-requests', array('methods'=>'POST','callback'=>array(__CLASS__,'import_create_requests'),'permission_callback'=>array(__CLASS__,'can_edit_products')));
         register_rest_route(self::ROUTE, '/voice-command-preview', array('methods'=>'POST','callback'=>array(__CLASS__,'voice_command_preview'),'permission_callback'=>array(__CLASS__,'can_read')));
@@ -201,6 +202,59 @@ final class ELAC_Connector {
             'products_created'=>0,'message'=>'Requests saved; each product requires explicit administrator approval.'),201);
     }
     // Parse a bounded Yabi CSV upload into the existing read-only preview pipeline.
+    // Read a page from a full Yabi export without importing or retaining the uploaded file.
+    // The client resubmits the same CSV and advances offset by the returned next_offset.
+    public static function yabi_csv_page($request) {
+        $files=$request->get_file_params();
+        $upload=isset($files['file']) ? $files['file'] : null;
+        if (!is_array($upload) || !isset($upload['tmp_name'],$upload['error'],$upload['size']) ||
+            (int)$upload['error']!==UPLOAD_ERR_OK || !is_uploaded_file($upload['tmp_name']))
+            return new WP_Error('invalid_upload','A valid CSV upload is required',array('status'=>400));
+        // Allow larger exports while keeping processing memory bounded to one page.
+        if ((int)$upload['size']<1 || (int)$upload['size']>20971520)
+            return new WP_Error('invalid_size','CSV must be at most 20 MiB',array('status'=>400));
+        $offset=$request->get_param('offset');
+        $offset=($offset===null) ? 0 : $offset;
+        if (!is_scalar($offset) || !preg_match('/^\\d{1,7}$/D',(string)$offset) || (int)$offset>1000000)
+            return new WP_Error('invalid_offset','Offset must be between 0 and 1000000',array('status'=>400));
+        $offset=(int)$offset;
+        $handle=fopen($upload['tmp_name'],'rb');
+        if (!$handle) return new WP_Error('csv_open_failed','Cannot open CSV',array('status'=>400));
+        $first=fgets($handle);
+        if ($first===false) { fclose($handle); return new WP_Error('empty_csv','Missing header',array('status'=>400)); }
+        $delimiter=count(str_getcsv($first,';','"','\\'))>count(str_getcsv($first,',','"','\\'))?';':',';
+        rewind($handle);
+        $headers=fgetcsv($handle,0,$delimiter,'"','\\');
+        if (!is_array($headers)) { fclose($handle); return new WP_Error('invalid_headers','Invalid header',array('status'=>400)); }
+        $headers[0]=preg_replace('/^\\xEF\\xBB\\xBF/','',$headers[0]);
+        $required=array('Product Name','EANs (JSON)','Price List (JSON)');
+        if (count($headers)!==count(array_unique($headers)) || array_diff($required,$headers)) {
+            fclose($handle); return new WP_Error('invalid_headers','Missing or duplicated Yabi columns',array('status'=>400));
+        }
+        $rows=array(); $index=0; $more=false;
+        while (($values=fgetcsv($handle,0,$delimiter,'"','\\'))!==false) {
+            if (count($values)===1 && trim((string)$values[0])==='') continue;
+            if (count($values)!==count($headers)) {
+                fclose($handle); return new WP_Error('invalid_csv_row','CSV column count mismatch at data row '.($index+1),array('status'=>400));
+            }
+            if ($index >= $offset+100) { $more=true; break; }
+            if ($index >= $offset) $rows[]=array_combine($headers,$values);
+            $index++;
+        }
+        fclose($handle);
+        if (!$rows) return array('read_only'=>true,'rows'=>array(),'scanned'=>0,'offset'=>$offset,'next_offset'=>null,'has_more'=>false);
+        $preview=new WP_REST_Request('POST','/'.self::ROUTE.'/yabi-preview');
+        $preview->set_param('rows',$rows);
+        $result=self::yabi_preview($preview);
+        if (is_wp_error($result)) return $result;
+        foreach ($result['rows'] as $i=>&$row) $row['row']=$offset+$i;
+        unset($row);
+        $result['offset']=$offset;
+        $result['next_offset']=$more?$offset+count($rows):null;
+        $result['has_more']=$more;
+        $result['uploaded_file_sha256']=hash_file('sha256',$upload['tmp_name']);
+        return $result;
+    }
     public static function yabi_csv_preview($request) {
         $files=$request->get_file_params();
         $upload=isset($files['file']) ? $files['file'] : null;

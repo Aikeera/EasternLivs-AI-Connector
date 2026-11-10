@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Eastern Livs AI Connector
  * Description: A security-first REST foundation for Eastern Livs: authenticated catalog reads and administrator-approved WooCommerce price requests. Not a ChatGPT plugin or MCP server.
- * Version: 0.4.0
+ * Version: 0.5.0
  * Requires PHP: 7.4
  * License: GPLv2 or later
  * Text Domain: eastern-livs-ai-connector
@@ -33,7 +33,7 @@ final class ELAC_Connector {
     public static function can_read() { return current_user_can('manage_woocommerce') || current_user_can('manage_options'); }
     public static function can_pages() { return current_user_can('edit_pages'); }
     public static function can_edit_products() { return current_user_can('edit_products') && current_user_can('manage_options'); }
-    public static function status() { return array('plugin'=>'Eastern Livs AI Connector','version'=>'0.4.0','site'=>home_url('/'),'woocommerce'=>class_exists('WooCommerce'),'mode'=>'Authenticated REST; manual admin approval for price changes','chatgpt_plus_direct'=>false,'mcp_server'=>false); }
+    public static function status() { return array('plugin'=>'Eastern Livs AI Connector','version'=>'0.5.0','site'=>home_url('/'),'woocommerce'=>class_exists('WooCommerce'),'mode'=>'Authenticated REST; manual admin approval for price changes','chatgpt_plus_direct'=>false,'mcp_server'=>false); }
     public static function products($request) {
         if (!function_exists('wc_get_products')) return new WP_Error('woocommerce_missing','WooCommerce is not active',array('status'=>503));
         $page=max(1,(int)$request->get_param('page')); $per_page=min(30,max(1,(int)$request->get_param('per_page')));
@@ -93,14 +93,18 @@ final class ELAC_Connector {
         if (!function_exists('wc_get_product')) return new WP_Error('woocommerce_missing','WooCommerce unavailable',array('status'=>503));
         $id=absint($request->get_param('product_id'));
         $url=esc_url_raw((string)$request->get_param('image_url'));
+        $expected_sku=trim((string)$request->get_param('expected_sku'));
         $product=wc_get_product($id);
         if (!$product || !$product->is_type('simple')) return new WP_Error('invalid_product','Existing simple product required',array('status'=>400));
+        if ($expected_sku!=='' && $expected_sku!==$product->get_sku()) return new WP_Error('sku_mismatch','Product barcode does not match expected_sku',array('status'=>409));
+        if ($product->get_image_id() && !$request->get_param('allow_replace')) return new WP_Error('image_exists','Existing featured image: set allow_replace explicitly to request replacement',array('status'=>409));
         if (!$url || !wp_http_validate_url($url) || strtolower((string)wp_parse_url($url,PHP_URL_SCHEME))!=='https') return new WP_Error('invalid_url','Public HTTPS image URL required',array('status'=>400));
         $request_id=wp_insert_post(array('post_type'=>self::CPT,'post_status'=>'private','post_title'=>'Image request for #'.$id));
         if (is_wp_error($request_id) || !$request_id) return new WP_Error('save_failed','Could not save request',array('status'=>500));
         update_post_meta($request_id,'_elac_type','image');
         update_post_meta($request_id,'_elac_product_id',$id);
         update_post_meta($request_id,'_elac_image_url',$url);
+        update_post_meta($request_id,'_elac_expected_sku',$product->get_sku());
         update_post_meta($request_id,'_elac_old_image_id',$product->get_image_id());
         update_post_meta($request_id,'_elac_state','pending');
         update_post_meta($request_id,'_elac_requested_by',get_current_user_id());
@@ -156,6 +160,7 @@ final class ELAC_Connector {
             $pid=(int)get_post_meta($id,'_elac_product_id',true); $p=wc_get_product($pid);
             if (!$p || !$p->is_type('simple')) wp_die('Product no longer supported');
             if ((int)$p->get_image_id() !== (int)get_post_meta($id,'_elac_old_image_id',true)) wp_die('Image changed since request; reject and submit a new request.');
+            if ((string)$p->get_sku() !== (string)get_post_meta($id,'_elac_expected_sku',true)) wp_die('Barcode changed since request; reject and submit a new request.');
             $attachment=self::attach_image((string)get_post_meta($id,'_elac_image_url',true),$pid);
             if (is_wp_error($attachment)) wp_die(esc_html($attachment->get_error_message()));
             $p->set_image_id($attachment); $p->save(); update_post_meta($id,'_elac_state','approved');

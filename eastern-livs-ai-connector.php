@@ -232,15 +232,31 @@ final class ELAC_Connector {
         if (count($headers)!==count(array_unique($headers)) || array_diff($required,$headers)) {
             fclose($handle); return new WP_Error('invalid_headers','Missing or duplicated Yabi columns',array('status'=>400));
         }
-        $rows=array(); $index=0; $more=false;
+        $rows=array(); $index=0; $more=false; $barcodes_seen=array(); $cross_page_duplicates=array();
         while (($values=fgetcsv($handle,0,$delimiter,'"','\\'))!==false) {
             if (count($values)===1 && trim((string)$values[0])==='') continue;
             if (count($values)!==count($headers)) {
                 fclose($handle); return new WP_Error('invalid_csv_row','CSV column count mismatch at data row '.($index+1),array('status'=>400));
             }
-            if ($index >= $offset+100) { $more=true; break; }
-            if ($index >= $offset) $rows[]=array_combine($headers,$values);
+            $record=array_combine($headers,$values);
+            // Scan the entire upload, not only the requested page, to detect duplicate
+            // barcodes across page boundaries and malformed trailing records.
+            $eans=json_decode((string)$record['EANs (JSON)'],true);
+            $unique_codes=array();
+            if (is_array($eans)) foreach ($eans as $ean) {
+                $code=is_scalar($ean)?(string)$ean:(is_array($ean)?(string)($ean['ean'] ?? $ean['EAN'] ?? $ean['barcode'] ?? ''):'');
+                if (preg_match('/^[0-9]{8,14}$/D',$code)) $unique_codes[$code]=true;
+            }
+            foreach ($unique_codes as $code=>$_) {
+                if (isset($barcodes_seen[$code])) {
+                    $cross_page_duplicates[$index]=true;
+                    $cross_page_duplicates[$barcodes_seen[$code]]=true;
+                } else $barcodes_seen[$code]=$index;
+            }
+            if ($index >= $offset+100) $more=true;
+            if ($index >= $offset && $index < $offset+100) $rows[]=$record;
             $index++;
+            if ($index>1000000) { fclose($handle); return new WP_Error('csv_too_many_rows','CSV exceeds the supported row limit',array('status'=>400)); }
         }
         fclose($handle);
         if (!$rows) return array('read_only'=>true,'rows'=>array(),'scanned'=>0,'offset'=>$offset,'next_offset'=>null,'has_more'=>false);
@@ -248,7 +264,14 @@ final class ELAC_Connector {
         $preview->set_param('rows',$rows);
         $result=self::yabi_preview($preview);
         if (is_wp_error($result)) return $result;
-        foreach ($result['rows'] as $i=>&$row) $row['row']=$offset+$i;
+        foreach ($result['rows'] as $i=>&$row) {
+            $row['row']=$offset+$i;
+            if (isset($cross_page_duplicates[$row['row']])) {
+                $row['issues'][]='duplicate_barcode_in_csv';
+                $row['issues']=array_values(array_unique($row['issues']));
+                $row['eligible_for_manual_review']=false;
+            }
+        }
         unset($row);
         $result['offset']=$offset;
         $result['next_offset']=$more?$offset+count($rows):null;

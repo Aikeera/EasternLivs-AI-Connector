@@ -550,7 +550,7 @@ final class ELAC_Connector {
         $type=(string)get_post_meta($id,'_elac_type',true);
         if (!in_array($decision,array('approve','reject'),true)) wp_die('Invalid decision');
         if (!in_array($type,array('price','image','remove','create','category','stock'),true)) wp_die('Unknown request type; no changes made.');
-        if ($decision==='reject') { update_post_meta($id,'_elac_state','rejected'); }
+        if ($decision==='reject') { update_post_meta($id,'_elac_state','rejected'); update_post_meta($id,'_elac_decided_by',get_current_user_id()); update_post_meta($id,'_elac_decided_at',current_time('mysql',true)); }
         elseif($decision==='approve' && get_post_meta($id,'_elac_type',true)==='image') {
             if (!function_exists('wc_get_product')) wp_die('WooCommerce inactive');
             $pid=(int)get_post_meta($id,'_elac_product_id',true); $p=wc_get_product($pid);

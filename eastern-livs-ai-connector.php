@@ -325,12 +325,27 @@ final class ELAC_Connector {
         }
         if (count($rows)!==count($seen))
             return new WP_Error('missing_row','Some selected rows are not in the CSV page',array('status'=>400));
-        // Stable idempotency key: retrying the same reviewed page must not queue duplicates.
+        // Persist the exact reviewed selection for safe retries across HTTP requests.
+        // A changed selection has a different key and still faces pending-SKU checks.
+        $selection=array_map('intval',array_keys($seen));
+        sort($selection,SORT_NUMERIC);
+        $job_key='elac_yabi_'.hash('sha256',get_current_user_id().'|'.$expected.'|'.$offset.'|'.implode(',',$selection));
+        $saved=get_option($job_key,false);
+        if (is_array($saved) && isset($saved['created_request_ids']))
+            return new WP_REST_Response($saved,200);
+        // Atomic add_option prevents two concurrent workers from creating the same batch.
+        $lock_key=$job_key.'_lock';
+        if (!add_option($lock_key,time(),'','no'))
+            return new WP_Error('batch_in_progress','This CSV selection is already being queued; retry shortly',array('status'=>409));
         // The batch endpoint also checks live WooCommerce and pending requests.
         $batch=new WP_REST_Request('POST','/'.self::ROUTE.'/import-create-requests');
         $batch->set_param('rows',$rows);
-        $result=self::import_create_requests($batch);
-        if (is_wp_error($result)) return $result;
+        try {
+            $result=self::import_create_requests($batch);
+            if (is_wp_error($result)) return $result;
+        } finally {
+            delete_option($lock_key);
+        }
         // Return a deterministic continuation cursor bound to the reviewed upload.
         // The caller can safely re-upload the same file and resume at next_offset;
         // no file is retained on the server and no WooCommerce products are created.
@@ -342,6 +357,10 @@ final class ELAC_Connector {
         $data['next_offset']=$page['next_offset'];
         $data['has_more']=$page['has_more'];
         $data['resume_requires_same_file']=true;
+        $data['batch_id']=$job_key;
+        // Keep the result until explicitly cleaned up by an administrator.
+        // This prevents successful batches being silently requeued after retries.
+        update_option($job_key,$data,false);
         return new WP_REST_Response($data,201);
     }
     public static function yabi_csv_preview($request) {
